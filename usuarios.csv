@@ -1,0 +1,5 @@
+usuario,password,rol,nombre_completo
+admin,admin123,Admin,Administrador
+serrano,serrano1,Operador,Op. Serrano
+norte,norte1,Operador,Op. Norte-Salud
+calama,calama1,Operador,Op. Calama
