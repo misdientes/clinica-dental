@@ -165,11 +165,11 @@ st.sidebar.markdown(
 )
 st.sidebar.markdown("---")
 
-MENU_ADMIN    = ["📊 Dashboard", "📥 Registrar Movimiento", "🔀 Transferencia entre Sucursales",
+MENU_ADMIN    = ["📊 Dashboard","➕ Agregar Producto","📥 Registrar Movimiento", "🔀 Transferencia entre Sucursales",
                  "📦 Inventario por Sucursal", "⚠️ Alertas", "📋 Historial",
                  "🛒 Órdenes de Compra", "📅 Vencimientos", "📈 Gráficos",
                  "⚙️ Configuración", "👥 Gestión de Usuarios"]
-MENU_OPERADOR = ["📥 Registrar Movimiento", "📦 Inventario por Sucursal",
+MENU_OPERADOR = ["➕ Agregar Producto","📥 Registrar Movimiento", "📦 Inventario por Sucursal",
                  "⚠️ Alertas", "📋 Historial", "📅 Vencimientos"]
 
 opcion = st.sidebar.radio("Navegación", MENU_ADMIN if es_admin else MENU_OPERADOR)
@@ -760,6 +760,69 @@ elif opcion == "👥 Gestión de Usuarios":
             st.rerun()
     else:
         st.info("No hay otros usuarios para eliminar.")
+
+# ══════════════════════════════════════════════
+# ➕ AGREGAR PRODUCTO
+# ══════════════════════════════════════════════
+elif opcion == "➕ Agregar Producto":
+    st.title("➕ Agregar Nuevo Producto")
+    
+    with st.form("form_nuevo_producto"):
+        st.subheader("Datos del producto")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            sku = st.text_input("SKU (código único)", placeholder="Ej: ALCOHOL-001")
+            nombre = st.text_input("Nombre del producto *", placeholder="Ej: Alcohol 70%")
+            categoria = st.selectbox("Categoría", ["Insumos", "Medicamentos", "Equipos", "Material de curación", "Otros"])
+            marca = st.text_input("Marca", placeholder="Ej: 3M, J&J, etc.")
+        
+        with col2:
+            precio = st.number_input("Precio unitario", min_value=0.0, step=100.0, format="%.0f")
+            stock_inicial = st.number_input("Stock inicial (unidades)", min_value=0, value=0)
+            sucursal = st.selectbox("Sucursal inicial", SUCURSALES)
+            ubicacion = st.text_input("Ubicación en bodega", placeholder="Ej: Estante A1")
+        
+        submitted = st.form_submit_button("✅ Guardar Producto", type="primary", use_container_width=True)
+        
+        if submitted:
+            if not sku.strip():
+                st.error("❌ El SKU es obligatorio")
+            elif not nombre.strip():
+                st.error("❌ El nombre es obligatorio")
+            else:
+                try:
+                    # Insertar en tabla productos
+                    sb.table("productos").insert({
+                        "sku": sku.strip().upper(),
+                        "nombre": nombre.strip(),
+                        "categoria": categoria,
+                        "marca": marca.strip(),
+                        "precio_unitario": precio
+                    }).execute()
+                    
+                    # Insertar stock inicial
+                    sb.table("stock").insert({
+                        "sku": sku.strip().upper(),
+                        "sucursal": sucursal,
+                        "stock_actual": stock_inicial,
+                        "ubicacion_bodega": ubicacion
+                    }).execute()
+                    
+                    # Asignar stock mínimo por defecto
+                    sb.table("stock_minimo").insert({
+                        "sku": sku.strip().upper(),
+                        "stock_minimo": 5
+                    }).execute(on_conflict="sku")
+                    
+                    st.success(f"✅ Producto '{nombre}' agregado exitosamente con SKU: {sku.strip().upper()}")
+                    st.balloons()
+                    
+                except Exception as e:
+                    if "duplicate key" in str(e):
+                        st.error("❌ Ya existe un producto con ese SKU. Usa otro código.")
+                    else:
+                        st.error(f"❌ Error al guardar: {e}")
 
 # ══════════════════════════════════════════════
 # PIE DE PÁGINA
