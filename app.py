@@ -558,6 +558,7 @@ elif opcion == "📋 Historial":
 # ══════════════════════════════════════════════
 elif opcion == "🛒 Órdenes de Compra":
     st.title("🛒 Órdenes de Compra")
+    from datetime import datetime, date, timedelta
 
     def generar_numero_orden():
         now = datetime.now()
@@ -580,14 +581,23 @@ elif opcion == "🛒 Órdenes de Compra":
             "estado": "first",
             "usuario": "first",
             "cantidad_solicitada": "sum",
-            "sku": lambda x: list(x)
+            "sku": lambda x: list(x),
+            "comentarios": "first"
         }).reset_index()
         resumen.rename(columns={"cantidad_solicitada": "total_items", "sku": "productos"}, inplace=True)
         resumen["productos"] = resumen["productos"].apply(lambda x: len(x))
         return resumen
 
+    def exportar_ordenes_excel(resumen_df, detalle_df, nombre_archivo):
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            resumen_df.to_excel(writer, sheet_name="Resumen", index=False)
+            detalle_df.to_excel(writer, sheet_name="Detalle", index=False)
+        return output.getvalue()
+
     tab1, tab2, tab3 = st.tabs(["➕ Nueva Orden (Múltiples productos)", "📋 Órdenes Activas", "📜 Historial de Órdenes Cerradas"])
 
+    # ================= TAB 1: NUEVA ORDEN CON CARRITO =================
     with tab1:
         st.subheader("🛒 Arma tu orden de compra")
         productos = load_productos()
@@ -654,28 +664,82 @@ elif opcion == "🛒 Órdenes de Compra":
             else:
                 st.info("El carrito está vacío. Agrega productos arriba.")
 
+    # ================= TAB 2: ÓRDENES ACTIVAS =================
     with tab2:
         st.subheader("📋 Órdenes activas")
+
+        # Filtros para admin
         if es_admin:
-            suc_filtro = st.selectbox("Filtrar por sucursal", ["Todas"] + SUCURSALES)
-            sucursal_filtro = None if suc_filtro == "Todas" else suc_filtro
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                suc_filtro = st.selectbox("Sucursal", ["Todas"] + SUCURSALES, key="act_suc")
+                sucursal_filtro = None if suc_filtro == "Todas" else suc_filtro
+            with col_f2:
+                fecha_desde = st.date_input("Fecha desde", value=date.today() - timedelta(days=30), key="act_desde")
+            with col_f3:
+                fecha_hasta = st.date_input("Fecha hasta", value=date.today(), key="act_hasta")
+            estado_filtro = st.selectbox("Estado", ["Todos", "Pendiente", "Enviada"])
         else:
             sucursal_filtro = user.get("sucursal", None)
             if sucursal_filtro:
                 st.info(f"Mostrando órdenes de tu sucursal: {sucursal_filtro}")
             else:
                 st.warning("Tu usuario no tiene asignada una sucursal. Contacta al administrador.")
-        estado_filtro = st.selectbox("Estado", ["Todos", "Pendiente", "Enviada"])
-        ordenes_activas = ordenes_agrupadas(sucursal_filtro, estado_filtro)
-        if ordenes_activas.empty:
-            st.info("No hay órdenes activas.")
+            fecha_desde = date.today() - timedelta(days=30)
+            fecha_hasta = date.today()
+            estado_filtro = st.selectbox("Estado", ["Todos", "Pendiente", "Enviada"])
+
+        # Cargar órdenes y aplicar filtros de fecha
+        ordenes_raw = load_ordenes()
+        if not ordenes_raw.empty:
+            ordenes_raw["fecha"] = pd.to_datetime(ordenes_raw["fecha"]).dt.date
+            if not es_admin:
+                ordenes_raw = ordenes_raw[ordenes_raw["sucursal"] == sucursal_filtro] if sucursal_filtro else ordenes_raw
+            ordenes_raw = ordenes_raw[(ordenes_raw["fecha"] >= fecha_desde) & (ordenes_raw["fecha"] <= fecha_hasta)]
+            if estado_filtro != "Todos":
+                ordenes_raw = ordenes_raw[ordenes_raw["estado"] == estado_filtro]
+
+        ordenes_activas = ordenes_agrupadas(sucursal_filtro, estado_filtro)  # este ya aplica filtros básicos, pero complementamos
+        # Mejor usar el dataframe filtrado manualmente para el resumen
+        if ordenes_raw.empty:
+            st.info("No hay órdenes activas con los filtros actuales.")
         else:
-            for _, orden in ordenes_activas.iterrows():
+            # Resumen a partir del raw filtrado
+            resumen_filtrado = ordenes_raw.groupby("numero_orden").agg({
+                "fecha": "first",
+                "sucursal": "first",
+                "estado": "first",
+                "usuario": "first",
+                "cantidad_solicitada": "sum",
+                "comentarios": "first"
+            }).reset_index()
+            resumen_filtrado["total_items"] = resumen_filtrado["cantidad_solicitada"]
+            resumen_filtrado = resumen_filtrado[["numero_orden", "fecha", "sucursal", "estado", "usuario", "total_items", "comentarios"]]
+
+            # Botón de exportar a Excel (solo admin)
+            if es_admin:
+                col_btn_exp1, _ = st.columns([1, 5])
+                with col_btn_exp1:
+                    if st.button("📥 Exportar activas a Excel", use_container_width=True):
+                        # Preparar detalle
+                        detalle_exp = ordenes_raw[["numero_orden", "sku", "nombre", "sucursal", "cantidad_solicitada", "estado", "usuario", "comentarios"]]
+                        excel_data = exportar_ordenes_excel(resumen_filtrado, detalle_exp, "ordenes_activas")
+                        st.download_button(
+                            label="📥 Descargar Excel",
+                            data=excel_data,
+                            file_name=f"ordenes_activas_{date.today()}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_activas"
+                        )
+
+            # Mostrar órdenes
+            for _, orden in resumen_filtrado.iterrows():
                 with st.expander(f"📄 {orden['numero_orden']} - {orden['sucursal']} - {orden['estado']} - {orden['fecha']}"):
-                    st.write(f"**Productos:** {orden['productos']} items")
                     st.write(f"**Total unidades:** {orden['total_items']}")
                     st.write(f"**Creada por:** {orden['usuario']}")
-                    detalle = q("ordenes", {"numero_orden": orden['numero_orden']})
+                    if orden.get("comentarios"):
+                        st.write(f"**Comentarios:** {orden['comentarios']}")
+                    detalle = ordenes_raw[ordenes_raw["numero_orden"] == orden['numero_orden']]
                     if not detalle.empty:
                         st.dataframe(detalle[["nombre", "cantidad_solicitada", "sucursal"]].rename(
                             columns={"nombre":"Producto", "cantidad_solicitada":"Cantidad", "sucursal":"Sucursal"}),
@@ -689,23 +753,64 @@ elif opcion == "🛒 Órdenes de Compra":
                             st.success(f"Orden {orden['numero_orden']} actualizada a '{nuevo_estado}'")
                             st.rerun()
 
+    # ================= TAB 3: HISTORIAL (ÓRDENES CERRADAS) =================
     with tab3:
         st.subheader("📜 Historial de órdenes cerradas")
         if es_admin:
-            suc_hist = st.selectbox("Sucursal", ["Todas"] + SUCURSALES, key="hist_suc")
-            suc_hist_filtro = None if suc_hist == "Todas" else suc_hist
+            col_h1, col_h2, col_h3 = st.columns(3)
+            with col_h1:
+                suc_hist = st.selectbox("Sucursal", ["Todas"] + SUCURSALES, key="hist_suc")
+                suc_hist_filtro = None if suc_hist == "Todas" else suc_hist
+            with col_h2:
+                f_desde_hist = st.date_input("Fecha desde", value=date.today() - timedelta(days=90), key="hist_desde")
+            with col_h3:
+                f_hasta_hist = st.date_input("Fecha hasta", value=date.today(), key="hist_hasta")
         else:
             suc_hist_filtro = user.get("sucursal", None)
-        ordenes_hist = ordenes_agrupadas(suc_hist_filtro, estado_filtro="Cerrada")
-        if ordenes_hist.empty:
-            st.info("No hay órdenes cerradas aún.")
-        else:
-            st.dataframe(ordenes_hist[["numero_orden", "fecha", "sucursal", "total_items", "usuario"]],
-                         use_container_width=True, hide_index=True)
-            st.download_button("📥 Exportar historial", data=exportar_excel(ordenes_hist, "Historial_Ordenes"),
-                               file_name=f"historial_ordenes_{date.today()}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            f_desde_hist = date.today() - timedelta(days=90)
+            f_hasta_hist = date.today()
 
+        ordenes_cerradas_raw = load_ordenes()
+        if not ordenes_cerradas_raw.empty:
+            ordenes_cerradas_raw = ordenes_cerradas_raw[ordenes_cerradas_raw["estado"] == "Cerrada"]
+            ordenes_cerradas_raw["fecha"] = pd.to_datetime(ordenes_cerradas_raw["fecha"]).dt.date
+            if suc_hist_filtro and not es_admin:
+                ordenes_cerradas_raw = ordenes_cerradas_raw[ordenes_cerradas_raw["sucursal"] == suc_hist_filtro]
+            elif es_admin and suc_hist_filtro:
+                ordenes_cerradas_raw = ordenes_cerradas_raw[ordenes_cerradas_raw["sucursal"] == suc_hist_filtro]
+            ordenes_cerradas_raw = ordenes_cerradas_raw[(ordenes_cerradas_raw["fecha"] >= f_desde_hist) & (ordenes_cerradas_raw["fecha"] <= f_hasta_hist)]
+
+        if ordenes_cerradas_raw.empty:
+            st.info("No hay órdenes cerradas con esos filtros.")
+        else:
+            # Resumen para mostrar y exportar
+            resumen_hist = ordenes_cerradas_raw.groupby("numero_orden").agg({
+                "fecha": "first",
+                "sucursal": "first",
+                "usuario": "first",
+                "cantidad_solicitada": "sum",
+                "comentarios": "first"
+            }).reset_index()
+            resumen_hist["total_items"] = resumen_hist["cantidad_solicitada"]
+            resumen_hist = resumen_hist[["numero_orden", "fecha", "sucursal", "usuario", "total_items", "comentarios"]]
+
+            if es_admin:
+                col_btn_exp2, _ = st.columns([1, 5])
+                with col_btn_exp2:
+                    if st.button("📥 Exportar historial a Excel", use_container_width=True):
+                        detalle_hist = ordenes_cerradas_raw[["numero_orden", "sku", "nombre", "sucursal", "cantidad_solicitada", "usuario", "comentarios"]]
+                        excel_hist = exportar_ordenes_excel(resumen_hist, detalle_hist, "historial_ordenes")
+                        st.download_button(
+                            label="📥 Descargar Excel",
+                            data=excel_hist,
+                            file_name=f"historial_ordenes_{date.today()}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_hist"
+                        )
+
+            st.dataframe(resumen_hist, use_container_width=True, hide_index=True)
+
+            # También puedes mostrar detalle expandible si quieres, pero con tabla de resumen basta
 # ══════════════════════════════════════════════
 # 📅 VENCIMIENTOS
 # ══════════════════════════════════════════════
