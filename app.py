@@ -91,8 +91,8 @@ def insert_lote(lote: dict):
 def insert_orden(orden: dict):
     sb.table("ordenes").insert(orden).execute()
 
-def update_orden_estado(id_orden, estado):
-    sb.table("ordenes").update({"estado": estado}).eq("id_orden", id_orden).execute()
+def update_orden_estado(numero_orden, estado):
+    sb.table("ordenes").update({"estado": estado}).eq("numero_orden", numero_orden).execute()
 
 def upsert_stock_min(sku, minimo):
     sb.table("stock_minimo").upsert({"sku": sku, "stock_minimo": minimo}).execute()
@@ -170,7 +170,7 @@ MENU_ADMIN    = ["📊 Dashboard","➕ Agregar Producto","📥 Registrar Movimie
                  "🛒 Órdenes de Compra", "📅 Vencimientos", "📈 Gráficos",
                  "⚙️ Configuración", "👥 Gestión de Usuarios"]
 MENU_OPERADOR = ["➕ Agregar Producto","📥 Registrar Movimiento", "📦 Inventario por Sucursal",
-                 "⚠️ Alertas", "📋 Historial", "📅 Vencimientos"]
+                 "⚠️ Alertas", "📋 Historial", "🛒 Órdenes de Compra", "📅 Vencimientos"]
 
 opcion = st.sidebar.radio("Navegación", MENU_ADMIN if es_admin else MENU_OPERADOR)
 st.sidebar.markdown("---")
@@ -488,12 +488,22 @@ elif opcion == "⚠️ Alertas":
         st.dataframe(critico[list(cols_alert)].rename(columns=cols_alert),
                      use_container_width=True, hide_index=True)
         if es_admin and st.button("🛒 Generar Orden de Compra con estos productos"):
+            from datetime import datetime
+            numero_orden = f"ORD-AUTO-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             for _, row in critico.iterrows():
-                insert_orden({"fecha": str(date.today()), "sku": row["sku"], "nombre": row["nombre"],
-                              "sucursal": row["sucursal"],
-                              "cantidad_solicitada": max(1, int(row["stock_minimo"]) * 2),
-                              "estado": "Pendiente", "usuario": user["nombre_completo"]})
-            st.success(f"✅ Orden generada con {len(critico)} productos")
+                insert_orden({
+                    "numero_orden": numero_orden,
+                    "fecha": str(date.today()),
+                    "sku": row["sku"],
+                    "nombre": row["nombre"],
+                    "sucursal": row["sucursal"],
+                    "cantidad_solicitada": max(1, int(row["stock_minimo"]) * 2),
+                    "estado": "Pendiente",
+                    "usuario": user["nombre_completo"],
+                    "comentarios": "Generada automáticamente desde alertas"
+                })
+            st.success(f"✅ Orden {numero_orden} generada con {len(critico)} productos")
+            st.rerun()
 
     if sin_stk.empty and critico.empty:
         st.success("✅ ¡Todo el inventario está sobre el mínimo!")
@@ -544,58 +554,157 @@ elif opcion == "📋 Historial":
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ══════════════════════════════════════════════
-# 🛒 ÓRDENES DE COMPRA
+# 🛒 ÓRDENES DE COMPRA (VERSIÓN MEJORADA)
 # ══════════════════════════════════════════════
 elif opcion == "🛒 Órdenes de Compra":
     st.title("🛒 Órdenes de Compra")
-    productos = load_productos()
-    ordenes   = load_ordenes()
 
-    tab1, tab2 = st.tabs(["📋 Ver Órdenes","➕ Nueva Orden Manual"])
+    def generar_numero_orden():
+        now = datetime.now()
+        sufijo = user.get("sucursal", "GEN")[:3].upper() if not es_admin else "ADM"
+        return f"ORD-{now.strftime('%Y%m%d-%H%M%S')}-{sufijo}"
+
+    def ordenes_agrupadas(filtrar_sucursal=None, estado_filtro=None):
+        ordenes_df = load_ordenes()
+        if ordenes_df.empty:
+            return pd.DataFrame()
+        if filtrar_sucursal and not es_admin:
+            ordenes_df = ordenes_df[ordenes_df["sucursal"] == filtrar_sucursal]
+        if estado_filtro and estado_filtro != "Todos":
+            ordenes_df = ordenes_df[ordenes_df["estado"] == estado_filtro]
+        if ordenes_df.empty:
+            return pd.DataFrame()
+        resumen = ordenes_df.groupby("numero_orden").agg({
+            "fecha": "first",
+            "sucursal": "first",
+            "estado": "first",
+            "usuario": "first",
+            "cantidad_solicitada": "sum",
+            "sku": lambda x: list(x)
+        }).reset_index()
+        resumen.rename(columns={"cantidad_solicitada": "total_items", "sku": "productos"}, inplace=True)
+        resumen["productos"] = resumen["productos"].apply(lambda x: len(x))
+        return resumen
+
+    tab1, tab2, tab3 = st.tabs(["➕ Nueva Orden (Múltiples productos)", "📋 Órdenes Activas", "📜 Historial de Órdenes Cerradas"])
 
     with tab1:
-        if ordenes.empty:
-            st.info("No hay órdenes registradas.")
+        st.subheader("🛒 Arma tu orden de compra")
+        productos = load_productos()
+        if productos.empty:
+            st.warning("No hay productos cargados. Agrega productos primero.")
         else:
-            est_f  = st.selectbox("Estado", ["Todos","Pendiente","Enviada","Recibida"])
-            df_ord = ordenes if est_f == "Todos" else ordenes[ordenes["estado"] == est_f]
-            st.dataframe(
-                df_ord[["id_orden","fecha","nombre","sucursal","cantidad_solicitada","estado","usuario"]]
-                .rename(columns={"id_orden":"ID","fecha":"Fecha","nombre":"Producto",
-                                 "sucursal":"Sucursal","cantidad_solicitada":"Cantidad",
-                                 "estado":"Estado","usuario":"Solicitado por"}),
-                use_container_width=True, hide_index=True)
-            st.markdown("---")
-            st.subheader("Actualizar estado")
-            id_sel    = st.number_input("ID de la orden", min_value=1, step=1)
-            nuevo_est = st.selectbox("Nuevo estado", ["Pendiente","Enviada","Recibida"])
-            if st.button("Actualizar"):
-                update_orden_estado(int(id_sel), nuevo_est)
-                st.success(f"✅ Orden #{id_sel} → '{nuevo_est}'")
-                st.rerun()
-            st.download_button("📥 Exportar a Excel", data=exportar_excel(df_ord, "Ordenes"),
-                               file_name=f"ordenes_{date.today()}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            if "carrito" not in st.session_state:
+                st.session_state.carrito = []
+
+            with st.form("agregar_al_carrito"):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    producto_opciones = productos.apply(lambda r: f"{r['nombre']} [{r['sku']}]", axis=1).tolist()
+                    seleccion = st.selectbox("Producto", producto_opciones)
+                    sku_seleccionado = productos[productos.apply(lambda r: f"{r['nombre']} [{r['sku']}]" == seleccion, axis=1)]["sku"].iloc[0]
+                    nombre_seleccionado = productos[productos["sku"] == sku_seleccionado]["nombre"].iloc[0]
+                with col2:
+                    cantidad = st.number_input("Cantidad", min_value=1, value=1, step=1)
+                with col3:
+                    sucursal_destino = st.selectbox("Sucursal destino", SUCURSALES)
+                agregar = st.form_submit_button("➕ Agregar al carrito")
+                if agregar and cantidad > 0:
+                    st.session_state.carrito.append({
+                        "sku": sku_seleccionado,
+                        "nombre": nombre_seleccionado,
+                        "cantidad": cantidad,
+                        "sucursal": sucursal_destino
+                    })
+                    st.success(f"✅ {nombre_seleccionado} x{cantidad} agregado")
+
+            if st.session_state.carrito:
+                st.subheader("📦 Carrito actual")
+                df_carrito = pd.DataFrame(st.session_state.carrito)
+                st.dataframe(df_carrito[["nombre", "cantidad", "sucursal"]], use_container_width=True, hide_index=True)
+
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button("🗑️ Vaciar carrito", use_container_width=True):
+                        st.session_state.carrito = []
+                        st.rerun()
+                with col_btn2:
+                    comentarios = st.text_area("Comentarios para la orden (opcional)")
+                    if st.button("✅ Generar Orden de Compra", type="primary", use_container_width=True):
+                        if not st.session_state.carrito:
+                            st.error("El carrito está vacío")
+                        else:
+                            numero_ord = generar_numero_orden()
+                            fecha_actual = str(date.today())
+                            for item in st.session_state.carrito:
+                                insert_orden({
+                                    "numero_orden": numero_ord,
+                                    "fecha": fecha_actual,
+                                    "sku": item["sku"],
+                                    "nombre": item["nombre"],
+                                    "sucursal": item["sucursal"],
+                                    "cantidad_solicitada": item["cantidad"],
+                                    "estado": "Pendiente",
+                                    "usuario": user["nombre_completo"],
+                                    "comentarios": comentarios
+                                })
+                            st.success(f"✅ Orden {numero_ord} generada con {len(st.session_state.carrito)} productos")
+                            st.session_state.carrito = []
+                            st.rerun()
+            else:
+                st.info("El carrito está vacío. Agrega productos arriba.")
 
     with tab2:
-        busq_o = st.text_input("🔍 Buscar producto")
-        df_o = productos.copy()
-        if busq_o.strip():
-            t = busq_o.strip().lower()
-            df_o = df_o[df_o["nombre"].str.lower().str.contains(t, na=False) |
-                        df_o["sku"].str.lower().str.contains(t, na=False)]
-        if not df_o.empty:
-            df_o["_op"] = df_o.apply(lambda r: f"{r['nombre']}  [{r['sku']}]", axis=1)
-            sel_o  = st.selectbox("Producto", df_o["_op"].tolist())
-            sku_o  = df_o.loc[df_o["_op"] == sel_o, "sku"].iloc[0]
-            nom_o  = df_o.loc[df_o["_op"] == sel_o, "nombre"].iloc[0]
-            suc_o  = st.selectbox("Sucursal destino", SUCURSALES)
-            cant_o = st.number_input("Cantidad", min_value=1, value=10)
-            if st.button("➕ Agregar a orden", type="primary"):
-                insert_orden({"fecha": str(date.today()), "sku": sku_o, "nombre": nom_o,
-                              "sucursal": suc_o, "cantidad_solicitada": cant_o,
-                              "estado": "Pendiente", "usuario": user["nombre_completo"]})
-                st.success(f"✅ {nom_o} agregado a la orden")
+        st.subheader("📋 Órdenes activas")
+        if es_admin:
+            suc_filtro = st.selectbox("Filtrar por sucursal", ["Todas"] + SUCURSALES)
+            sucursal_filtro = None if suc_filtro == "Todas" else suc_filtro
+        else:
+            sucursal_filtro = user.get("sucursal", None)
+            if sucursal_filtro:
+                st.info(f"Mostrando órdenes de tu sucursal: {sucursal_filtro}")
+            else:
+                st.warning("Tu usuario no tiene asignada una sucursal. Contacta al administrador.")
+        estado_filtro = st.selectbox("Estado", ["Todos", "Pendiente", "Enviada"])
+        ordenes_activas = ordenes_agrupadas(sucursal_filtro, estado_filtro)
+        if ordenes_activas.empty:
+            st.info("No hay órdenes activas.")
+        else:
+            for _, orden in ordenes_activas.iterrows():
+                with st.expander(f"📄 {orden['numero_orden']} - {orden['sucursal']} - {orden['estado']} - {orden['fecha']}"):
+                    st.write(f"**Productos:** {orden['productos']} items")
+                    st.write(f"**Total unidades:** {orden['total_items']}")
+                    st.write(f"**Creada por:** {orden['usuario']}")
+                    detalle = q("ordenes", {"numero_orden": orden['numero_orden']})
+                    if not detalle.empty:
+                        st.dataframe(detalle[["nombre", "cantidad_solicitada", "sucursal"]].rename(
+                            columns={"nombre":"Producto", "cantidad_solicitada":"Cantidad", "sucursal":"Sucursal"}),
+                            use_container_width=True, hide_index=True)
+                    if es_admin and orden['estado'] not in ["Recibida", "Cerrada"]:
+                        nuevo_estado = st.selectbox(f"Cambiar estado para {orden['numero_orden']}",
+                                                    ["Pendiente", "Enviada", "Recibida", "Cerrada"],
+                                                    key=f"estado_{orden['numero_orden']}")
+                        if st.button(f"Actualizar {orden['numero_orden']}", key=f"btn_{orden['numero_orden']}"):
+                            update_orden_estado(orden['numero_orden'], nuevo_estado)
+                            st.success(f"Orden {orden['numero_orden']} actualizada a '{nuevo_estado}'")
+                            st.rerun()
+
+    with tab3:
+        st.subheader("📜 Historial de órdenes cerradas")
+        if es_admin:
+            suc_hist = st.selectbox("Sucursal", ["Todas"] + SUCURSALES, key="hist_suc")
+            suc_hist_filtro = None if suc_hist == "Todas" else suc_hist
+        else:
+            suc_hist_filtro = user.get("sucursal", None)
+        ordenes_hist = ordenes_agrupadas(suc_hist_filtro, estado_filtro="Cerrada")
+        if ordenes_hist.empty:
+            st.info("No hay órdenes cerradas aún.")
+        else:
+            st.dataframe(ordenes_hist[["numero_orden", "fecha", "sucursal", "total_items", "usuario"]],
+                         use_container_width=True, hide_index=True)
+            st.download_button("📥 Exportar historial", data=exportar_excel(ordenes_hist, "Historial_Ordenes"),
+                               file_name=f"historial_ordenes_{date.today()}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ══════════════════════════════════════════════
 # 📅 VENCIMIENTOS
@@ -792,7 +901,6 @@ elif opcion == "➕ Agregar Producto":
                 st.error("❌ El nombre es obligatorio")
             else:
                 try:
-                    # Insertar en tabla productos
                     sb.table("productos").insert({
                         "sku": sku.strip().upper(),
                         "nombre": nombre.strip(),
@@ -801,7 +909,6 @@ elif opcion == "➕ Agregar Producto":
                         "precio_unitario": precio
                     }).execute()
                     
-                    # Insertar stock inicial
                     sb.table("stock").insert({
                         "sku": sku.strip().upper(),
                         "sucursal": sucursal,
@@ -809,7 +916,6 @@ elif opcion == "➕ Agregar Producto":
                         "ubicacion_bodega": ubicacion
                     }).execute()
                     
-                    # Asignar stock mínimo por defecto
                     sb.table("stock_minimo").insert({
                         "sku": sku.strip().upper(),
                         "stock_minimo": 5
