@@ -94,6 +94,15 @@ def insert_orden(orden: dict):
 def update_orden_estado(numero_orden, estado):
     sb.table("ordenes").update({"estado": estado}).eq("numero_orden", numero_orden).execute()
 
+def eliminar_orden(numero_orden):
+    """Elimina todas las líneas de una orden por su número de orden."""
+    try:
+        sb.table("ordenes").delete().eq("numero_orden", numero_orden).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error al eliminar: {e}")
+        return False
+
 def upsert_stock_min(sku, minimo):
     sb.table("stock_minimo").upsert({"sku": sku, "stock_minimo": minimo}).execute()
 
@@ -516,7 +525,7 @@ elif opcion == "⚠️ Alertas":
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ══════════════════════════════════════════════
-# 📋 HISTORIAL
+# 📋 HISTORIAL DE MOVIMIENTOS
 # ══════════════════════════════════════════════
 elif opcion == "📋 Historial":
     st.title("📋 Historial de Movimientos")
@@ -554,7 +563,7 @@ elif opcion == "📋 Historial":
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ══════════════════════════════════════════════
-# 🛒 ÓRDENES DE COMPRA (VERSIÓN MEJORADA)
+# 🛒 ÓRDENES DE COMPRA (VERSIÓN COMPLETA)
 # ══════════════════════════════════════════════
 elif opcion == "🛒 Órdenes de Compra":
     st.title("🛒 Órdenes de Compra")
@@ -564,36 +573,6 @@ elif opcion == "🛒 Órdenes de Compra":
         now = datetime.now()
         sufijo = user.get("sucursal", "GEN")[:3].upper() if not es_admin else "ADM"
         return f"ORD-{now.strftime('%Y%m%d-%H%M%S')}-{sufijo}"
-
-    def ordenes_agrupadas(filtrar_sucursal=None, estado_filtro=None):
-        ordenes_df = load_ordenes()
-        if ordenes_df.empty:
-            return pd.DataFrame()
-        if filtrar_sucursal and not es_admin:
-            ordenes_df = ordenes_df[ordenes_df["sucursal"] == filtrar_sucursal]
-        if estado_filtro and estado_filtro != "Todos":
-            ordenes_df = ordenes_df[ordenes_df["estado"] == estado_filtro]
-        if ordenes_df.empty:
-            return pd.DataFrame()
-        resumen = ordenes_df.groupby("numero_orden").agg({
-            "fecha": "first",
-            "sucursal": "first",
-            "estado": "first",
-            "usuario": "first",
-            "cantidad_solicitada": "sum",
-            "sku": lambda x: list(x),
-            "comentarios": "first"
-        }).reset_index()
-        resumen.rename(columns={"cantidad_solicitada": "total_items", "sku": "productos"}, inplace=True)
-        resumen["productos"] = resumen["productos"].apply(lambda x: len(x))
-        return resumen
-
-    def exportar_ordenes_excel(resumen_df, detalle_df, nombre_archivo):
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            resumen_df.to_excel(writer, sheet_name="Resumen", index=False)
-            detalle_df.to_excel(writer, sheet_name="Detalle", index=False)
-        return output.getvalue()
 
     tab1, tab2, tab3 = st.tabs(["➕ Nueva Orden (Múltiples productos)", "📋 Órdenes Activas", "📜 Historial de Órdenes Cerradas"])
 
@@ -666,96 +645,165 @@ elif opcion == "🛒 Órdenes de Compra":
 
     # ================= TAB 2: ÓRDENES ACTIVAS =================
     with tab2:
-        st.subheader("📋 Órdenes activas")
+        st.subheader("📋 Órdenes Activas")
 
-        # Filtros para admin
+        # =========== LÓGICA PARA ADMIN ===========
         if es_admin:
+            st.write("### Vista de administrador")
             col_f1, col_f2, col_f3 = st.columns(3)
             with col_f1:
-                suc_filtro = st.selectbox("Sucursal", ["Todas"] + SUCURSALES, key="act_suc")
-                sucursal_filtro = None if suc_filtro == "Todas" else suc_filtro
+                suc_filtro = st.selectbox("Filtrar por sucursal", ["Todas"] + SUCURSALES, key="act_suc")
+                suc_val = None if suc_filtro == "Todas" else suc_filtro
             with col_f2:
-                fecha_desde = st.date_input("Fecha desde", value=date.today() - timedelta(days=30), key="act_desde")
+                f_desde = st.date_input("Fecha desde", value=date.today() - timedelta(days=30), key="act_desde")
             with col_f3:
-                fecha_hasta = st.date_input("Fecha hasta", value=date.today(), key="act_hasta")
-            estado_filtro = st.selectbox("Estado", ["Todos", "Pendiente", "Enviada"])
+                f_hasta = st.date_input("Fecha hasta", value=date.today(), key="act_hasta")
+            estados_admin = ["Pendiente", "Enviada", "Recibida", "Cerrada", "Rechazada"]
+            estado_filtro = st.selectbox("Estado", ["Todos"] + estados_admin)
+
+            ordenes_df = load_ordenes()
+            if not ordenes_df.empty:
+                ordenes_df["fecha"] = pd.to_datetime(ordenes_df["fecha"]).dt.date
+                if suc_val:
+                    ordenes_df = ordenes_df[ordenes_df["sucursal"] == suc_val]
+                ordenes_df = ordenes_df[(ordenes_df["fecha"] >= f_desde) & (ordenes_df["fecha"] <= f_hasta)]
+                if estado_filtro != "Todos":
+                    ordenes_df = ordenes_df[ordenes_df["estado"] == estado_filtro]
+
+                if ordenes_df.empty:
+                    st.info("No hay órdenes con esos filtros.")
+                else:
+                    # Agrupar para mostrar resumen
+                    resumen = ordenes_df.groupby("numero_orden").agg({
+                        "fecha": "first", "sucursal": "first", "estado": "first", "usuario": "first",
+                        "cantidad_solicitada": "sum", "comentarios": "first"
+                    }).reset_index()
+                    resumen["total_items"] = resumen["cantidad_solicitada"]
+                    resumen = resumen[["numero_orden", "fecha", "sucursal", "estado", "usuario", "total_items", "comentarios"]]
+
+                    # Botón exportar Excel (directo)
+                    col_btn, _ = st.columns([1,5])
+                    with col_btn:
+                        detalle = ordenes_df[["numero_orden", "sku", "nombre", "sucursal", "cantidad_solicitada", "estado", "usuario", "comentarios"]]
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                            resumen.to_excel(writer, sheet_name="Resumen", index=False)
+                            detalle.to_excel(writer, sheet_name="Detalle", index=False)
+                        st.download_button("📥 Exportar a Excel", data=output.getvalue(),
+                                           file_name=f"ordenes_{date.today()}.xlsx",
+                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+                    # Mostrar cada orden con opción de cambiar estado (sin actualizar stock automáticamente)
+                    for _, ord in resumen.iterrows():
+                        with st.expander(f"📄 {ord['numero_orden']} - {ord['sucursal']} - {ord['estado']} - {ord['fecha']}"):
+                            st.write(f"Total unidades: {ord['total_items']}")
+                            st.write(f"Creada por: {ord['usuario']}")
+                            if ord['comentarios']:
+                                st.write(f"Comentarios: {ord['comentarios']}")
+                            detalle_ord = ordenes_df[ordenes_df["numero_orden"] == ord['numero_orden']]
+                            if not detalle_ord.empty:
+                                st.dataframe(detalle_ord[["nombre","cantidad_solicitada","sucursal"]].rename(
+                                    columns={"nombre":"Producto","cantidad_solicitada":"Cant.","sucursal":"Sucursal"}),
+                                    use_container_width=True, hide_index=True)
+
+                            # Admin puede cambiar estado (sin procesar stock)
+                            if ord['estado'] not in ["Cerrada","Rechazada"]:
+                                nuevo_est = st.selectbox(f"Cambiar estado", ["Pendiente","Enviada","Recibida","Cerrada","Rechazada"],
+                                                         key=f"est_{ord['numero_orden']}")
+                                if st.button(f"Aplicar cambio", key=f"btn_{ord['numero_orden']}"):
+                                    update_orden_estado(ord['numero_orden'], nuevo_est)
+                                    st.success(f"Orden {ord['numero_orden']} → {nuevo_est}")
+                                    st.rerun()
+
+        # =========== VISTA PARA OPERADOR (RECEPCIÓN DE MERCANCÍA) ===========
         else:
-            sucursal_filtro = user.get("sucursal", None)
-            if sucursal_filtro:
-                st.info(f"Mostrando órdenes de tu sucursal: {sucursal_filtro}")
-            else:
+            st.write("### 📦 Recepción de mercadería en tu sucursal")
+            sucursal_op = user.get("sucursal")
+            if not sucursal_op:
                 st.warning("Tu usuario no tiene asignada una sucursal. Contacta al administrador.")
-            fecha_desde = date.today() - timedelta(days=30)
-            fecha_hasta = date.today()
-            estado_filtro = st.selectbox("Estado", ["Todos", "Pendiente", "Enviada"])
+            else:
+                ordenes_op = load_ordenes()
+                if ordenes_op.empty:
+                    st.info("No hay órdenes para recibir.")
+                else:
+                    ordenes_op["fecha"] = pd.to_datetime(ordenes_op["fecha"]).dt.date
+                    ordenes_op = ordenes_op[(ordenes_op["sucursal"] == sucursal_op) & (ordenes_op["estado"] == "Enviada")]
+                    if ordenes_op.empty:
+                        st.info("No hay órdenes enviadas pendientes de recepción.")
+                    else:
+                        num_ordenes = ordenes_op["numero_orden"].unique()
+                        for num_ord in num_ordenes:
+                            items_ord = ordenes_op[ordenes_op["numero_orden"] == num_ord]
+                            with st.expander(f"📦 Orden {num_ord} - {items_ord.iloc[0]['fecha']}"):
+                                st.write(f"**Solicitado por:** {items_ord.iloc[0]['usuario']}")
+                                st.write(f"**Comentarios:** {items_ord.iloc[0]['comentarios'] or 'Ninguno'}")
+                                
+                                st.write("**Productos - Ajusta cantidades recibidas:**")
+                                data = []
+                                for _, row in items_ord.iterrows():
+                                    data.append({
+                                        "Producto": row["nombre"],
+                                        "Solicitado": row["cantidad_solicitada"],
+                                        "Recibido (ajustar)": row["cantidad_solicitada"]
+                                    })
+                                df_edit = pd.DataFrame(data)
+                                edited_df = st.data_editor(df_edit,
+                                                           column_config={
+                                                               "Recibido (ajustar)": st.column_config.NumberColumn(min_value=0, step=1)
+                                                           },
+                                                           disabled=["Producto", "Solicitado"],
+                                                           hide_index=True,
+                                                           key=f"edit_{num_ord}")
+                                
+                                fecha_venc = st.date_input("Fecha de vencimiento (opcional, para todos los productos)", value=None, key=f"venc_{num_ord}")
+                                
+                                if st.button(f"✅ Confirmar Recepción de {num_ord}", key=f"recibir_{num_ord}"):
+                                    exitos = 0
+                                    for idx, row in items_ord.iterrows():
+                                        sku = row["sku"]
+                                        solicitado = row["cantidad_solicitada"]
+                                        recibido = edited_df.loc[edited_df["Producto"] == row["nombre"], "Recibido (ajustar)"].values[0]
+                                        if recibido <= 0:
+                                            continue
+                                        # Actualizar stock
+                                        stock_actual = get_stock_val(sku, sucursal_op)
+                                        if stock_actual is None:
+                                            sb.table("stock").insert({"sku": sku, "sucursal": sucursal_op, "stock_actual": 0}).execute()
+                                            stock_actual = 0
+                                        nuevo_stock = stock_actual + recibido
+                                        update_stock(sku, sucursal_op, nuevo_stock)
+                                        # Registrar movimiento
+                                        insert_movimiento({
+                                            "fecha_hora": datetime.now().isoformat(),
+                                            "sku": sku,
+                                            "sucursal": sucursal_op,
+                                            "tipo_movimiento": "Entrada por Compra",
+                                            "cantidad": recibido,
+                                            "motivo": f"Recepción orden {num_ord} (solicitado {solicitado}, recibido {recibido})",
+                                            "usuario": user["nombre_completo"]
+                                        })
+                                        if fecha_venc:
+                                            insert_lote({
+                                                "sku": sku,
+                                                "sucursal": sucursal_op,
+                                                "cantidad": recibido,
+                                                "fecha_vencimiento": str(fecha_venc),
+                                                "fecha_ingreso": str(date.today())
+                                            })
+                                        # Si existe columna cantidad_recibida, actualizarla
+                                        try:
+                                            sb.table("ordenes").update({"cantidad_recibida": recibido}).eq("sku", sku).eq("numero_orden", num_ord).execute()
+                                        except Exception:
+                                            pass  # columna no existe, ignorar
+                                        exitos += 1
+                                    # Cambiar estado de la orden a "Cerrada"
+                                    update_orden_estado(num_ord, "Cerrada")
+                                    st.success(f"✅ Orden {num_ord} cerrada. {exitos} productos actualizados.")
+                                    st.rerun()
 
-        # Cargar órdenes y aplicar filtros de fecha
-        ordenes_raw = load_ordenes()
-        if not ordenes_raw.empty:
-            ordenes_raw["fecha"] = pd.to_datetime(ordenes_raw["fecha"]).dt.date
-            if not es_admin:
-                ordenes_raw = ordenes_raw[ordenes_raw["sucursal"] == sucursal_filtro] if sucursal_filtro else ordenes_raw
-            ordenes_raw = ordenes_raw[(ordenes_raw["fecha"] >= fecha_desde) & (ordenes_raw["fecha"] <= fecha_hasta)]
-            if estado_filtro != "Todos":
-                ordenes_raw = ordenes_raw[ordenes_raw["estado"] == estado_filtro]
-
-        ordenes_activas = ordenes_agrupadas(sucursal_filtro, estado_filtro)  # este ya aplica filtros básicos, pero complementamos
-        # Mejor usar el dataframe filtrado manualmente para el resumen
-        if ordenes_raw.empty:
-            st.info("No hay órdenes activas con los filtros actuales.")
-        else:
-            # Resumen a partir del raw filtrado
-            resumen_filtrado = ordenes_raw.groupby("numero_orden").agg({
-                "fecha": "first",
-                "sucursal": "first",
-                "estado": "first",
-                "usuario": "first",
-                "cantidad_solicitada": "sum",
-                "comentarios": "first"
-            }).reset_index()
-            resumen_filtrado["total_items"] = resumen_filtrado["cantidad_solicitada"]
-            resumen_filtrado = resumen_filtrado[["numero_orden", "fecha", "sucursal", "estado", "usuario", "total_items", "comentarios"]]
-
-            # Botón de exportar a Excel (solo admin)
-            if es_admin:
-                col_btn_exp1, _ = st.columns([1, 5])
-                with col_btn_exp1:
-                    if st.button("📥 Exportar activas a Excel", use_container_width=True):
-                        # Preparar detalle
-                        detalle_exp = ordenes_raw[["numero_orden", "sku", "nombre", "sucursal", "cantidad_solicitada", "estado", "usuario", "comentarios"]]
-                        excel_data = exportar_ordenes_excel(resumen_filtrado, detalle_exp, "ordenes_activas")
-                        st.download_button(
-                            label="📥 Descargar Excel",
-                            data=excel_data,
-                            file_name=f"ordenes_activas_{date.today()}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="download_activas"
-                        )
-
-            # Mostrar órdenes
-            for _, orden in resumen_filtrado.iterrows():
-                with st.expander(f"📄 {orden['numero_orden']} - {orden['sucursal']} - {orden['estado']} - {orden['fecha']}"):
-                    st.write(f"**Total unidades:** {orden['total_items']}")
-                    st.write(f"**Creada por:** {orden['usuario']}")
-                    if orden.get("comentarios"):
-                        st.write(f"**Comentarios:** {orden['comentarios']}")
-                    detalle = ordenes_raw[ordenes_raw["numero_orden"] == orden['numero_orden']]
-                    if not detalle.empty:
-                        st.dataframe(detalle[["nombre", "cantidad_solicitada", "sucursal"]].rename(
-                            columns={"nombre":"Producto", "cantidad_solicitada":"Cantidad", "sucursal":"Sucursal"}),
-                            use_container_width=True, hide_index=True)
-                    if es_admin and orden['estado'] not in ["Recibida", "Cerrada"]:
-                        nuevo_estado = st.selectbox(f"Cambiar estado para {orden['numero_orden']}",
-                                                    ["Pendiente", "Enviada", "Recibida", "Cerrada"],
-                                                    key=f"estado_{orden['numero_orden']}")
-                        if st.button(f"Actualizar {orden['numero_orden']}", key=f"btn_{orden['numero_orden']}"):
-                            update_orden_estado(orden['numero_orden'], nuevo_estado)
-                            st.success(f"Orden {orden['numero_orden']} actualizada a '{nuevo_estado}'")
-                            st.rerun()
-
-    # ================= TAB 3: HISTORIAL (ÓRDENES CERRADAS) =================
+    # ================= TAB 3: HISTORIAL (ÓRDENES CERRADAS O RECHAZADAS) =================
     with tab3:
-        st.subheader("📜 Historial de órdenes cerradas")
+        st.subheader("📜 Historial de órdenes cerradas o rechazadas")
         if es_admin:
             col_h1, col_h2, col_h3 = st.columns(3)
             with col_h1:
@@ -770,47 +818,62 @@ elif opcion == "🛒 Órdenes de Compra":
             f_desde_hist = date.today() - timedelta(days=90)
             f_hasta_hist = date.today()
 
-        ordenes_cerradas_raw = load_ordenes()
-        if not ordenes_cerradas_raw.empty:
-            ordenes_cerradas_raw = ordenes_cerradas_raw[ordenes_cerradas_raw["estado"] == "Cerrada"]
-            ordenes_cerradas_raw["fecha"] = pd.to_datetime(ordenes_cerradas_raw["fecha"]).dt.date
-            if suc_hist_filtro and not es_admin:
-                ordenes_cerradas_raw = ordenes_cerradas_raw[ordenes_cerradas_raw["sucursal"] == suc_hist_filtro]
-            elif es_admin and suc_hist_filtro:
-                ordenes_cerradas_raw = ordenes_cerradas_raw[ordenes_cerradas_raw["sucursal"] == suc_hist_filtro]
-            ordenes_cerradas_raw = ordenes_cerradas_raw[(ordenes_cerradas_raw["fecha"] >= f_desde_hist) & (ordenes_cerradas_raw["fecha"] <= f_hasta_hist)]
+        ordenes_hist_raw = load_ordenes()
+        if not ordenes_hist_raw.empty:
+            ordenes_hist_raw = ordenes_hist_raw[ordenes_hist_raw["estado"].isin(["Cerrada", "Rechazada"])]
+            ordenes_hist_raw["fecha"] = pd.to_datetime(ordenes_hist_raw["fecha"]).dt.date
+            if suc_hist_filtro:
+                ordenes_hist_raw = ordenes_hist_raw[ordenes_hist_raw["sucursal"] == suc_hist_filtro]
+            ordenes_hist_raw = ordenes_hist_raw[(ordenes_hist_raw["fecha"] >= f_desde_hist) & (ordenes_hist_raw["fecha"] <= f_hasta_hist)]
 
-        if ordenes_cerradas_raw.empty:
-            st.info("No hay órdenes cerradas con esos filtros.")
+        if ordenes_hist_raw.empty:
+            st.info("No hay órdenes en historial con esos filtros.")
         else:
-            # Resumen para mostrar y exportar
-            resumen_hist = ordenes_cerradas_raw.groupby("numero_orden").agg({
+            # Resumen
+            resumen_hist = ordenes_hist_raw.groupby("numero_orden").agg({
                 "fecha": "first",
                 "sucursal": "first",
+                "estado": "first",
                 "usuario": "first",
                 "cantidad_solicitada": "sum",
                 "comentarios": "first"
             }).reset_index()
             resumen_hist["total_items"] = resumen_hist["cantidad_solicitada"]
-            resumen_hist = resumen_hist[["numero_orden", "fecha", "sucursal", "usuario", "total_items", "comentarios"]]
+            resumen_hist = resumen_hist[["numero_orden", "fecha", "sucursal", "estado", "usuario", "total_items", "comentarios"]]
 
+            # Exportar historial (solo admin)
             if es_admin:
-                col_btn_exp2, _ = st.columns([1, 5])
-                with col_btn_exp2:
-                    if st.button("📥 Exportar historial a Excel", use_container_width=True):
-                        detalle_hist = ordenes_cerradas_raw[["numero_orden", "sku", "nombre", "sucursal", "cantidad_solicitada", "usuario", "comentarios"]]
-                        excel_hist = exportar_ordenes_excel(resumen_hist, detalle_hist, "historial_ordenes")
-                        st.download_button(
-                            label="📥 Descargar Excel",
-                            data=excel_hist,
-                            file_name=f"historial_ordenes_{date.today()}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="download_hist"
-                        )
+                col_btn_exp, _ = st.columns([1, 5])
+                with col_btn_exp:
+                    detalle_hist = ordenes_hist_raw[["numero_orden", "sku", "nombre", "sucursal", "cantidad_solicitada", "estado", "usuario", "comentarios"]]
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        resumen_hist.to_excel(writer, sheet_name="Resumen", index=False)
+                        detalle_hist.to_excel(writer, sheet_name="Detalle", index=False)
+                    st.download_button("📥 Exportar historial a Excel", data=output.getvalue(),
+                                       file_name=f"historial_ordenes_{date.today()}.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            st.dataframe(resumen_hist, use_container_width=True, hide_index=True)
+            # Mostrar órdenes con botón eliminar (solo admin)
+            for _, ord_h in resumen_hist.iterrows():
+                with st.expander(f"📄 {ord_h['numero_orden']} - {ord_h['sucursal']} - {ord_h['estado']} - {ord_h['fecha']}"):
+                    st.write(f"Total unidades: {ord_h['total_items']}")
+                    st.write(f"Creada por: {ord_h['usuario']}")
+                    if ord_h['comentarios']:
+                        st.write(f"Comentarios: {ord_h['comentarios']}")
+                    detalle_hist_ord = ordenes_hist_raw[ordenes_hist_raw["numero_orden"] == ord_h['numero_orden']]
+                    if not detalle_hist_ord.empty:
+                        st.dataframe(detalle_hist_ord[["nombre", "cantidad_solicitada", "sucursal"]].rename(
+                            columns={"nombre":"Producto", "cantidad_solicitada":"Cantidad", "sucursal":"Sucursal"}),
+                            use_container_width=True, hide_index=True)
+                    if es_admin:
+                        if st.button(f"🗑️ Eliminar orden {ord_h['numero_orden']}", key=f"del_{ord_h['numero_orden']}"):
+                            if eliminar_orden(ord_h['numero_orden']):
+                                st.success(f"Orden {ord_h['numero_orden']} eliminada del historial.")
+                                st.rerun()
+                            else:
+                                st.error("No se pudo eliminar la orden.")
 
-            # También puedes mostrar detalle expandible si quieres, pero con tabla de resumen basta
 # ══════════════════════════════════════════════
 # 📅 VENCIMIENTOS
 # ══════════════════════════════════════════════
